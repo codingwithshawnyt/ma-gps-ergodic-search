@@ -1,0 +1,7 @@
+non*.egg-info
+experiment_script/log
+**/__pycache__/
+
+**/__pycache__/
+MAGPS/policy/__pycache__/
+.DS_Store
