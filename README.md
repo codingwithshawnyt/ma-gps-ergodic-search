@@ -1,39 +1,122 @@
-## Multi-agent Guided Policy Search (MA-GPS)
+# Multi-Agent Guided Policy Search (MA-GPS) for Ergodic Search
 
-This repository contains the implementation of Guided Policy Search for Multi-Agent Non-cooperative Dynamic Games. We propose two different environments for testing our approach: one is three-unicycle platooning, and the other is six-player basketball training. If you are interested in learning more about this work, please refer to the following paper: [Multi-Agent Guided Policy Search for Non-Cooperative Dynamic Games](https://arxiv.org/pdf/2509.24226), J. Li*, G. Qu*. J. Choi, S. Sojoudi, C. Tomlin.
+This repository builds on the [Multi-Agent Guided Policy Search (MA-GPS)](https://arxiv.org/pdf/2509.24226) framework by J. Li\*, G. Qu\*, J. Choi, S. Sojoudi, and C. Tomlin, which learns Nash equilibrium policies for multi-agent non-cooperative dynamic games using model-based LQ game guidance to stabilize multi-agent policy gradients.
 
-Our repo defines general-sum dynamic games using a customized gym env API. You can find general-sum dynamic games examples in /MAGPS/MARL_gym_envs/
+**Our goal** is to extend MA-GPS to the problem of **multi-agent ergodic search** — training multiple agents to learn coverage policies over a target spatial distribution, where agents may have competing objectives. This combines game-theoretic multi-agent RL with ergodic control theory to enable intelligent, coordinated (or adversarial) exploration of a search space.
 
+## Current Status
 
-# Implementation details and installation guide:
+We have reproduced the two benchmark experiments from the original MA-GPS paper:
 
-Our implementation builds upon the deep RL infrastructure of [Tianshou](https://github.com/thu-ml/tianshou) (version 0.5.1).  
+- **Three-Vehicle Unicycle Platooning** — three cars learn to merge into a single-file platoon (Figure 2b in the paper)
+- **Six-Player Basketball Formation** — six players from two teams learn strategic positioning near the basket (Figure 3b in the paper)
 
-We recommend Python version 3.12. 
+All six algorithm-environment combinations (MA-GPS, MAPPO, MADDPG × both environments) have been trained and verified. Trained checkpoints are included in `experiment_script/log/`.
 
-Install instruction:
+Next steps involve designing a new Gym environment for multi-agent ergodic search, with a reward function based on the [ergodic metric](https://www.sciencedirect.com/science/article/pii/S016727891000285X) (Mathew & Mezić, 2011), and training agents using the MA-GPS framework.
 
-0. git clone the repo
+## Repository Structure
 
-1. Conda create -n magps python=3.12
+- `MAGPS/` — Core library (policy implementations, environments, training infrastructure)
+  - `MARL_gym_envs/` — Custom Gym environments for general-sum dynamic games
+  - `policy/gym_marl_policy/` — IPPO, MAPPO, MADDPG, and MA-GPS policy implementations
+- `experiment_script/` — Training scripts, evaluation notebooks, and trained checkpoints
+  - `run_magps.py`, `run_mappo.py`, `run_maddpg.py` — Training entry points
+  - `eval_magps_three_unicycle.ipynb` — Evaluation notebook for unicycle platooning
+  - `eval_magps_six_basketball.ipynb` — Evaluation notebook for basketball formation
+  - `log/` — Trained model checkpoints
+- `notebooks/` — Ergodic search tutorials
+  - `ergodic_metric.ipynb` — Introduction to the ergodic metric and Fourier basis functions
+  - `smc_ergodic_control.ipynb` — Spectral Multiscale Coverage (SMC) closed-form ergodic control
+  - `kernel_ergodic_control.ipynb` — Fast ergodic search with kernel functions (JAX)
 
-2. cd to the root location of this repo, where you should be able to see the "setup.py". Note that if you use MacOS, then pytorch 2.4.0 is not available, and therefore you have to first change the line 22 of setup.py from "pytorch==2.4.0" to "pytorch==2.2.2", and then do the step 3. (However, Pytorch==2.4.0 is available for Ubuntu systems. So, if you use Ubuntu, then you can directly go to step 3. )
+## Installation
 
-3. run in terminal: pip install -e .
+Our implementation builds upon the deep RL infrastructure of [Tianshou](https://github.com/thu-ml/tianshou) (version 0.5.1).
 
-4. run in terminal: conda install -c conda-forge ffmpeg
+### Standard Setup (Ubuntu/Linux with CUDA)
 
-Brief tutorial: we use `experiment_script/run_magps.py` to learn our policy. We visualize the results  in `experiment_script/eval_magps_three_unicycle.ipynb` and `experiment_script/eval_magps_six_basketball.ipynb`. 
+```bash
+git clone https://github.com/codingwithshawnyt/ma-gps-ergodic-search.git
+cd ma-gps-ergodic-search
+conda create -n magps python=3.10 -y
+conda activate magps
+pip install -e .
+conda install -c conda-forge ffmpeg
+```
 
-# Some sample training scripts, in the experiment_script folder:
+### macOS Setup
 
-For three unicycle platooning
+On macOS, PyTorch 2.4.0 is not available. Before running `pip install -e .`, edit `setup.py` line 22:
 
-> python run_magps.py --task Three_Unicycle_Game-v0 --critic-net 512 512 512 --actor-net 512 512 512 --epoch 15 --total-episodes 160 --gamma 0.99 --behavior-loss-weight 0.1 --batch-size 2048
+```
+# Change this:
+"torch==2.4.0"
+# To this:
+"torch==2.2.2"
+```
 
-For six basketball players in training:
+Then proceed with the standard install steps above.
 
-> python run_magps.py --task basketball-v0 --critic-net 512 512 512 --actor-net 512 512 512 --epoch 15 --total-episodes 160 --gamma 0.99 --behavior-loss-weight 0.1 --batch-size 2048
+### Older NVIDIA Drivers (CUDA < 12.x)
 
+If your GPU machine has an older NVIDIA driver (e.g., driver 470.x / CUDA 11.4), PyTorch 2.4.0 will silently fall back to CPU. In this case, install PyTorch separately before the editable install:
 
-You can easily evaluate the trained policy in the notebooks in the experiment_script folder: using eval_magps_six_basketball.ipynb and eval_magps_three_unicycle.ipynb
+```bash
+conda create -n magps python=3.10 -y
+conda activate magps
+pip install torch==1.12.1+cu113 torchvision==0.13.1+cu113 torchaudio==0.12.1+cu113 \
+    --extra-index-url https://download.pytorch.org/whl/cu113
+```
+
+Then loosen the version pins in `setup.py`:
+- `"torch==2.4.0"` → `"torch>=1.12.1"`
+- `"numpy==1.26.4"` → `"numpy>=1.22.0,<1.25.0"`
+- `"gymnasium==0.28.1"` → `"gymnasium>=0.26.0,<0.29.0"`
+
+And run `pip install -e .`.
+
+## Training
+
+From the `experiment_script/` directory:
+
+```bash
+# Three unicycle platooning (MA-GPS)
+python run_magps.py --task Three_Unicycle_Game-v0 \
+    --critic-net 512 512 512 --actor-net 512 512 512 \
+    --epoch 15 --total-episodes 160 --gamma 0.99 \
+    --behavior-loss-weight 0.1 --batch-size 2048
+
+# Six-player basketball (MA-GPS)
+python run_magps.py --task basketball-v0 \
+    --critic-net 512 512 512 --actor-net 512 512 512 \
+    --epoch 15 --total-episodes 160 --gamma 0.99 \
+    --behavior-loss-weight 0.1 --batch-size 2048
+```
+
+Replace `run_magps.py` with `run_mappo.py` or `run_maddpg.py` to train with those algorithms.
+
+To specify a GPU: add `--device cuda:0` (or `cuda:1`, etc.).
+
+## Evaluation
+
+Open the evaluation notebooks in `experiment_script/`:
+
+```bash
+cd experiment_script
+jupyter notebook
+```
+
+- `eval_magps_three_unicycle.ipynb` — loads a trained policy and visualizes car platooning trajectories
+- `eval_magps_six_basketball.ipynb` — loads a trained policy and visualizes basketball player formations
+
+Set `EPOCH_TO_LOAD` at the top of each notebook to select which checkpoint to evaluate.
+
+## References
+
+- J. Li, G. Qu, J. Choi, S. Sojoudi, C. Tomlin. [Multi-Agent Guided Policy Search for Non-Cooperative Dynamic Games](https://arxiv.org/pdf/2509.24226), 2025.
+- G. Mathew, I. Mezić. [Metrics for Ergodicity and Design of Ergodic Dynamics for Multi-Agent Systems](https://www.sciencedirect.com/science/article/pii/S016727891000285X), Physica D, 2011.
+
+## Acknowledgments
+
+This work is part of research conducted at the CMU Biorobotics Lab under Prof. Howie Choset, in collaboration with Darwin Mick.
