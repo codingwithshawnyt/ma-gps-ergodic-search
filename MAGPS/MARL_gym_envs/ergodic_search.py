@@ -321,7 +321,7 @@ class ErgodicSearchEnv(gym.Env):
 
             # Jacobian of -P(x) w.r.t. position
             # Scale factor for gradient strength
-            grad_scale = 50.0
+            grad_scale = 5.0
 
             # ∂(-P)/∂x = Σ_k w_k * k1*π * sin(k1πx) * cos(k2πy)
             jac_x = grad_scale * torch.sum(wk * k1 * pi * sin_k1x * cos_k2y, dim=1)
@@ -335,8 +335,8 @@ class ErgodicSearchEnv(gym.Env):
             hess_yy = grad_scale * torch.sum(wk * (k2 * pi) ** 2 * cos_k1x * cos_k2y, dim=1)
             hess_xy = grad_scale * torch.sum(-wk * k1 * k2 * pi**2 * sin_k1x * sin_k2y, dim=1)
 
-            hessians[i, :, ix, ix] = hess_xx
-            hessians[i, :, iy, iy] = hess_yy
+            hessians[i, :, ix, ix] = hess_xx + 1.0  # regularization
+            hessians[i, :, iy, iy] = hess_yy + 1.0  # regularization
             hessians[i, :, ix, iy] = hess_xy
             hessians[i, :, iy, ix] = hess_xy
 
