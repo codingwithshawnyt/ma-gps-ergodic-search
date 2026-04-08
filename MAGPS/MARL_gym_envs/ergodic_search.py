@@ -21,9 +21,21 @@ class ErgodicSearchEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 30}
 
     PEAKS = [
-        {"mean": np.array([0.35, 0.38]), "cov": np.array([[0.01, 0.004], [0.004, 0.01]]), "weight": 0.5},
-        {"mean": np.array([0.68, 0.25]), "cov": np.array([[0.005, -0.003], [-0.003, 0.005]]), "weight": 0.2},
-        {"mean": np.array([0.56, 0.64]), "cov": np.array([[0.008, 0.0], [0.0, 0.004]]), "weight": 0.3},
+        {
+            "mean": np.array([0.35, 0.38]),
+            "cov": np.array([[0.01, 0.004], [0.004, 0.01]]),
+            "weight": 0.5,
+        },
+        {
+            "mean": np.array([0.68, 0.25]),
+            "cov": np.array([[0.005, -0.003], [-0.003, 0.005]]),
+            "weight": 0.2,
+        },
+        {
+            "mean": np.array([0.56, 0.64]),
+            "cov": np.array([[0.008, 0.0], [0.0, 0.004]]),
+            "weight": 0.3,
+        },
     ]
 
     def __init__(
@@ -71,8 +83,12 @@ class ErgodicSearchEnv(gym.Env):
         action_low = -action_limit * np.ones(self.total_action_dim)
         action_high = action_limit * np.ones(self.total_action_dim)
 
-        self.observation_space = spaces.Box(low=state_low, high=state_high, dtype=np.float64)
-        self.action_space = spaces.Box(low=action_low, high=action_high, dtype=np.float64)
+        self.observation_space = spaces.Box(
+            low=state_low, high=state_high, dtype=np.float64
+        )
+        self.action_space = spaces.Box(
+            low=action_low, high=action_high, dtype=np.float64
+        )
 
         self.L_list = np.array([1.0, 1.0])
 
@@ -107,7 +123,7 @@ class ErgodicSearchEnv(gym.Env):
 
         for i, k_vec in enumerate(self.lq_ks):
             fk = np.prod(np.cos(np.pi * k_vec * grids), axis=1)
-            lq_hk[i] = max(np.sqrt(np.sum(fk ** 2) * dx * dy), 1e-10)
+            lq_hk[i] = max(np.sqrt(np.sum(fk**2) * dx * dy), 1e-10)
             lq_phik[i] = np.sum((fk / lq_hk[i]) * pdf_vals) * dx * dy
 
         self.lq_wk = lq_lamk * lq_phik / lq_hk
@@ -140,7 +156,7 @@ class ErgodicSearchEnv(gym.Env):
         self.hk_list = np.zeros(self.ks.shape[0])
         for i, k_vec in enumerate(self.ks):
             fk = np.prod(np.cos(np.pi * k_vec * grids), axis=1)
-            self.hk_list[i] = max(np.sqrt(np.sum(fk ** 2) * dx * dy), 1e-10)
+            self.hk_list[i] = max(np.sqrt(np.sum(fk**2) * dx * dy), 1e-10)
         self.lamk_list = np.power(1.0 + np.linalg.norm(self.ks, axis=1), -1.5)
 
     def _compute_target_coefficients(self):
@@ -194,14 +210,16 @@ class ErgodicSearchEnv(gym.Env):
         reward = 0.0
         for i in range(self.num_agents):
             reward += self.w_pdf * self._target_pdf_single(new_pos[i])
-        reward -= self.w_ctrl * np.sum(accel ** 2)
+        reward -= self.w_ctrl * np.sum(accel**2)
 
         for i in range(self.num_agents):
             gx = min(int(new_pos[i, 0] * self.grid_res), self.grid_res - 1)
             gy = min(int(new_pos[i, 1] * self.grid_res), self.grid_res - 1)
             visit_count = self.visit_grid[gx, gy]
             if visit_count < 10:
-                cell_center = np.array([(gx + 0.5) / self.grid_res, (gy + 0.5) / self.grid_res])
+                cell_center = np.array(
+                    [(gx + 0.5) / self.grid_res, (gy + 0.5) / self.grid_res]
+                )
                 cell_pdf = self._target_pdf_single(cell_center)
                 reward += 0.5 * (1.0 - visit_count / 10.0) * (1.0 + cell_pdf * 0.1)
             self.visit_grid[gx, gy] += 1
@@ -224,7 +242,9 @@ class ErgodicSearchEnv(gym.Env):
 
         info = {
             "ergodic_metric": float(self._compute_ergodic_metric()),
-            "coverage_fraction": float(np.sum(self.visit_grid > 0) / (self.grid_res ** 2)),
+            "coverage_fraction": float(
+                np.sum(self.visit_grid > 0) / (self.grid_res**2)
+            ),
             "time": float(self.current_time),
             "step": self.step_count,
             "individual_cost": costs,
@@ -238,9 +258,13 @@ class ErgodicSearchEnv(gym.Env):
         else:
             agents = np.zeros((self.num_agents, 4))
             agents[:, :2] = self.np_random.uniform(
-                low=self.init_pos_low, high=self.init_pos_high, size=(self.num_agents, 2)
+                low=self.init_pos_low,
+                high=self.init_pos_high,
+                size=(self.num_agents, 2),
             )
-            agents[:, 2:] = self.np_random.uniform(low=-0.05, high=0.05, size=(self.num_agents, 2))
+            agents[:, 2:] = self.np_random.uniform(
+                low=-0.05, high=0.05, size=(self.num_agents, 2)
+            )
             self.state = agents.ravel()
 
         self.ck_list_update = np.zeros(self.ks.shape[0])
@@ -262,15 +286,24 @@ class ErgodicSearchEnv(gym.Env):
         state_dim = self.total_state_dim
         alpha = 0.2
         grad_scale = 1.0
-        pos_hess = 15.0   # position curvature (max |δx| = 3.25/15 = 0.22)
-        vel_hess = 0.5    # velocity curvature (prevents ill-conditioning)
+        pos_hess = 5.0  # position curvature (max |δx| = 3.25/5 = 0.65)
+        vel_hess = 0.5  # velocity curvature (prevents ill-conditioning)
 
         ks = self.lq_ks_torch.to(device=z.device, dtype=z.dtype)
         wk = self.lq_wk_torch.to(device=z.device, dtype=z.dtype)
         pi = 3.141592653589793
 
-        jacobians = torch.zeros(num_players, batch_size, input_dim, device=z.device, dtype=z.dtype)
-        hessians = torch.zeros(num_players, batch_size, input_dim, input_dim, device=z.device, dtype=z.dtype)
+        jacobians = torch.zeros(
+            num_players, batch_size, input_dim, device=z.device, dtype=z.dtype
+        )
+        hessians = torch.zeros(
+            num_players,
+            batch_size,
+            input_dim,
+            input_dim,
+            device=z.device,
+            dtype=z.dtype,
+        )
 
         for i in range(num_players):
             ix = i * 4
@@ -295,8 +328,22 @@ class ErgodicSearchEnv(gym.Env):
             jac_x = grad_scale * torch.sum(wk * k1 * pi * sin_k1x * cos_k2y, dim=1)
             jac_y = grad_scale * torch.sum(wk * k2 * pi * cos_k1x * sin_k2y, dim=1)
 
-            jacobians[i, :, ix] = torch.clamp(jac_x, -10.0, 10.0)
-            jacobians[i, :, iy] = torch.clamp(jac_y, -10.0, 10.0)
+            # Boundary repulsion: quadratic wall potential
+            margin = 0.02  # minimum distance from boundary
+            w_wall = 0.5  # wall strength
+            px_safe = torch.clamp(px, margin, 1.0 - margin)
+            py_safe = torch.clamp(py, margin, 1.0 - margin)
+            wall_jac_x = (
+                -w_wall / (px_safe - 0.0 + margin) ** 2
+                + w_wall / (1.0 - px_safe + margin) ** 2
+            )
+            wall_jac_y = (
+                -w_wall / (py_safe - 0.0 + margin) ** 2
+                + w_wall / (1.0 - py_safe + margin) ** 2
+            )
+
+            jacobians[i, :, ix] = torch.clamp(jac_x + wall_jac_x, -10.0, 10.0)
+            jacobians[i, :, iy] = torch.clamp(jac_y + wall_jac_y, -10.0, 10.0)
 
             # Inter-agent repulsion (Jacobian only — safe since Hessian is fixed)
             for j in range(num_players):
@@ -312,6 +359,10 @@ class ErgodicSearchEnv(gym.Env):
             jacobians[i, :, iax] = 2.0 * alpha * z[:, iax]
             jacobians[i, :, iay] = 2.0 * alpha * z[:, iay]
 
+            # Velocity damping: penalize zero velocity (agents should move)
+            jacobians[i, :, ivx] = 0.1 * z[:, ivx]
+            jacobians[i, :, ivy] = 0.1 * z[:, ivy]
+
             # FIXED positive-definite diagonal Hessian
             hessians[i, :, ix, ix] = pos_hess
             hessians[i, :, iy, iy] = pos_hess
@@ -322,7 +373,9 @@ class ErgodicSearchEnv(gym.Env):
 
         # NaN/Inf safety
         if torch.isnan(jacobians).any() or torch.isinf(jacobians).any():
-            jacobians = torch.where(torch.isfinite(jacobians), jacobians, torch.zeros_like(jacobians))
+            jacobians = torch.where(
+                torch.isfinite(jacobians), jacobians, torch.zeros_like(jacobians)
+            )
 
         return jacobians, hessians
 
@@ -351,7 +404,7 @@ class ErgodicSearchEnv(gym.Env):
         dt = 0.05
         damp = 0.5
         dt_damped = dt * (1.0 - damp * dt)  # = 0.04875
-        dt_sq = dt * dt                      # = 0.0025
+        dt_sq = dt * dt  # = 0.0025
 
         jacobian = torch.zeros(batch_size, n, n + m, device=states.device)
         for i in range(num_players):
