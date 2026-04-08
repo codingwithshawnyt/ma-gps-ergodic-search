@@ -207,22 +207,35 @@ class ErgodicSearchEnv(gym.Env):
                     new_pos[i, d] = 1.0
                     new_vel[i, d] = -abs(new_vel[i, d]) * 0.5
 
+        # === Reward ===
         reward = 0.0
-        for i in range(self.num_agents):
-            reward += self.w_pdf * self._target_pdf_single(new_pos[i])
-        reward -= self.w_ctrl * np.sum(accel**2)
 
+        # 1. MOVEMENT reward: reward speed (agents MUST keep moving)
+        for i in range(self.num_agents):
+            speed = np.linalg.norm(new_vel[i])
+            reward += 20.0 * speed  # dominant signal: keep moving
+
+        # 2. Exploration: reward visiting NEW high-PDF cells (diminishing returns)
         for i in range(self.num_agents):
             gx = min(int(new_pos[i, 0] * self.grid_res), self.grid_res - 1)
             gy = min(int(new_pos[i, 1] * self.grid_res), self.grid_res - 1)
             visit_count = self.visit_grid[gx, gy]
-            if visit_count < 10:
+            if visit_count < 5:
                 cell_center = np.array(
                     [(gx + 0.5) / self.grid_res, (gy + 0.5) / self.grid_res]
                 )
                 cell_pdf = self._target_pdf_single(cell_center)
-                reward += 0.5 * (1.0 - visit_count / 10.0) * (1.0 + cell_pdf * 0.1)
+                reward += 10.0 * (1.0 + cell_pdf) * (1.0 - visit_count / 5.0)
             self.visit_grid[gx, gy] += 1
+
+        # 3. Light control penalty
+        reward -= 0.05 * np.sum(accel ** 2)
+
+        # 4. Stillness penalty: if agent barely moved, penalize
+        for i in range(self.num_agents):
+            displacement = np.linalg.norm(new_pos[i] - pos[i])
+            if displacement < 0.001:
+                reward -= 5.0
 
         fk = self._evaluate_fourier_basis(new_pos)
         self.ck_list_update += fk * self.dt
@@ -290,7 +303,16 @@ class ErgodicSearchEnv(gym.Env):
         vel_hess = 0.5  # velocity curvature (prevents ill-conditioning)
 
         ks = self.lq_ks_torch.to(device=z.device, dtype=z.dtype)
-        wk = self.lq_wk_torch.to(device=z.device, dtype=z.dtype)
+        # Replace static wk with dynamic S_k
+        if self.current_time > 0:
+            ck_current = self.ck_list_update / self.current_time
+        else:
+            ck_current = np.zeros(len(self.lq_ks))
+        # Only use the lq_k_max subset
+        sk_dynamic = ck_current[:len(self.lq_ks)] - self.lq_phik
+        dynamic_wk = self.lq_lamk * sk_dynamic / self.lq_hk
+        # Convert to torch
+        wk = torch.tensor(dynamic_wk, device=z.device, dtype=z.dtype)
         pi = 3.141592653589793
 
         jacobians = torch.zeros(
