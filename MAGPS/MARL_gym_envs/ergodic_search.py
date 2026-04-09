@@ -1,12 +1,21 @@
 """
-Multi-Agent Ergodic Search Environment (v3 — final)
+Multi-Agent Ergodic Search Environment (v5 — delta-metric reward)
 
-All fixes applied:
-1. Fixed diagonal Hessian (pos=15, vel=0.5, ctrl=0.4) — no singular matrix possible
-2. Corrected dynamics_jacobian: ∂x/∂vx = dt*(1-damp*dt), ∂x/∂ax = dt²
-3. Jacobian-only inter-agent repulsion (safe since Hessian is fixed)
-4. SMC Fourier gradient in Jacobian (k_max=5, grad_scale=1.0)
-5. All outputs clamped, NaN fallback
+Key insight from Mathew & Mezić (2011) and Miller & Murphey (2013):
+The ergodic metric is a TRAJECTORY-LEVEL functional. It cannot be
+decomposed into per-step costs for a Riccati solver. The MA-GPS LQ
+guidance can only provide a directional hint (toward high-PDF regions).
+The actual coverage behavior must come from the RL reward.
+
+Changes from v4:
+1. PRIMARY reward = negative change in ergodic metric (directly optimizes
+   what we care about: when agents move to reduce metric, reward > 0)
+2. SECONDARY reward = speed bonus (keeps agents moving, less noisy)
+3. REMOVED: PDF-at-position reward (caused parking at peaks)
+4. REMOVED: PDF-weighted cell bonus (caused parking at peaks)
+5. LQ guidance uses STATIC weights (dynamic S_k doesn't work in batch
+   setting — costs_jacobian_and_hessian is called on off-policy batches)
+6. Use with --behavior-loss-weight 0.1 (let RL reward dominate)
 """
 
 from typing import Optional
@@ -47,8 +56,9 @@ class ErgodicSearchEnv(gym.Env):
         action_limit: float = 2.0,
         velocity_limit: float = 0.5,
         damping: float = 0.5,
-        reward_pdf_weight: float = 10.0,
-        reward_control_weight: float = 0.1,
+        reward_metric_weight: float = 500.0,
+        reward_speed_weight: float = 5.0,
+        reward_control_weight: float = 0.05,
         init_pos_low: float = 0.2,
         init_pos_high: float = 0.8,
         render_mode: Optional[str] = None,
@@ -66,7 +76,8 @@ class ErgodicSearchEnv(gym.Env):
         self.init_pos_low = init_pos_low
         self.init_pos_high = init_pos_high
         self.render_mode = render_mode
-        self.w_pdf = reward_pdf_weight
+        self.w_metric = reward_metric_weight
+        self.w_speed = reward_speed_weight
         self.w_ctrl = reward_control_weight
 
         self.nx = 4
@@ -207,44 +218,49 @@ class ErgodicSearchEnv(gym.Env):
                     new_pos[i, d] = 1.0
                     new_vel[i, d] = -abs(new_vel[i, d]) * 0.5
 
-        # === Reward ===
-        reward = 0.0
+        # ---- Ergodic metric BEFORE update ----
+        old_metric = self._compute_ergodic_metric()
 
-        # 1. MOVEMENT reward: reward speed (agents MUST keep moving)
-        for i in range(self.num_agents):
-            speed = np.linalg.norm(new_vel[i])
-            reward += 20.0 * speed  # dominant signal: keep moving
-
-        # 2. Exploration: reward visiting NEW high-PDF cells (diminishing returns)
-        for i in range(self.num_agents):
-            gx = min(int(new_pos[i, 0] * self.grid_res), self.grid_res - 1)
-            gy = min(int(new_pos[i, 1] * self.grid_res), self.grid_res - 1)
-            visit_count = self.visit_grid[gx, gy]
-            if visit_count < 5:
-                cell_center = np.array(
-                    [(gx + 0.5) / self.grid_res, (gy + 0.5) / self.grid_res]
-                )
-                cell_pdf = self._target_pdf_single(cell_center)
-                reward += 10.0 * (1.0 + cell_pdf) * (1.0 - visit_count / 5.0)
-            self.visit_grid[gx, gy] += 1
-
-        # 3. Light control penalty
-        reward -= 0.05 * np.sum(accel ** 2)
-
-        # 4. Stillness penalty: if agent barely moved, penalize
-        for i in range(self.num_agents):
-            displacement = np.linalg.norm(new_pos[i] - pos[i])
-            if displacement < 0.001:
-                reward -= 5.0
-
+        # ---- Update Fourier coefficients (trajectory statistics) ----
         fk = self._evaluate_fourier_basis(new_pos)
         self.ck_list_update += fk * self.dt
         self.current_time += self.dt
+
+        # ---- Ergodic metric AFTER update ----
+        new_metric = self._compute_ergodic_metric()
+        delta_metric = new_metric - old_metric
+
+        # ---- Update visit grid (for coverage tracking only) ----
+        for i in range(self.num_agents):
+            gx = min(int(new_pos[i, 0] * self.grid_res), self.grid_res - 1)
+            gy = min(int(new_pos[i, 1] * self.grid_res), self.grid_res - 1)
+            self.visit_grid[gx, gy] += 1
+
+        # ==================================================================
+        # REWARD: directly optimize the ergodic metric
+        # ==================================================================
+        reward = 0.0
+
+        # 1. PRIMARY: negative delta-metric (reward DECREASING metric)
+        #    When agents move to new areas: metric decreases → positive reward
+        #    When agents park: metric increases (time-avg concentrates) → negative
+        reward += self.w_metric * (-delta_metric)
+
+        # 2. SECONDARY: speed bonus (helps exploration, less noisy than metric)
+        for i in range(self.num_agents):
+            speed = np.linalg.norm(new_vel[i])
+            reward += self.w_speed * speed
+
+        # 3. Light control penalty
+        reward -= self.w_ctrl * np.sum(accel ** 2)
+
+        # ==================================================================
 
         new_agents = np.column_stack([new_pos, new_vel])
         self.state = new_agents.ravel()
         self.step_count += 1
 
+        # Per-player costs for LQ game (used by MA-GPS Riccati solver)
         costs = np.zeros(self.num_players)
         for i in range(self.num_players):
             pdf_val = max(self._target_pdf_single(new_pos[i]), 1e-10)
@@ -254,7 +270,8 @@ class ErgodicSearchEnv(gym.Env):
         truncated = self.step_count >= self.max_episode_steps
 
         info = {
-            "ergodic_metric": float(self._compute_ergodic_metric()),
+            "ergodic_metric": float(new_metric),
+            "delta_metric": float(delta_metric),
             "coverage_fraction": float(
                 np.sum(self.visit_grid > 0) / (self.grid_res**2)
             ),
@@ -292,6 +309,11 @@ class ErgodicSearchEnv(gym.Env):
     # =========================================================================
     # MA-GPS: costs_jacobian_and_hessian
     # =========================================================================
+    # NOTE: This provides a STATIC directional hint toward high-PDF regions.
+    # It CANNOT encode the trajectory-level ergodic objective (Mathew & Mezić
+    # 2011, §3). The actual coverage behavior comes from the RL reward above.
+    # Use with --behavior-loss-weight 0.1 so RL dominates.
+    # =========================================================================
 
     def costs_jacobian_and_hessian(self, z):
         batch_size, input_dim = z.shape
@@ -299,32 +321,19 @@ class ErgodicSearchEnv(gym.Env):
         state_dim = self.total_state_dim
         alpha = 0.2
         grad_scale = 1.0
-        pos_hess = 5.0  # position curvature (max |δx| = 3.25/5 = 0.65)
-        vel_hess = 0.5  # velocity curvature (prevents ill-conditioning)
+        pos_hess = 5.0
+        vel_hess = 0.5
 
         ks = self.lq_ks_torch.to(device=z.device, dtype=z.dtype)
-        # Replace static wk with dynamic S_k
-        if self.current_time > 0:
-            ck_current = self.ck_list_update / self.current_time
-        else:
-            ck_current = np.zeros(len(self.lq_ks))
-        # Only use the lq_k_max subset
-        sk_dynamic = ck_current[:len(self.lq_ks)] - self.lq_phik
-        dynamic_wk = self.lq_lamk * sk_dynamic / self.lq_hk
-        # Convert to torch
-        wk = torch.tensor(dynamic_wk, device=z.device, dtype=z.dtype)
+        wk = self.lq_wk_torch.to(device=z.device, dtype=z.dtype)
         pi = 3.141592653589793
 
         jacobians = torch.zeros(
             num_players, batch_size, input_dim, device=z.device, dtype=z.dtype
         )
         hessians = torch.zeros(
-            num_players,
-            batch_size,
-            input_dim,
-            input_dim,
-            device=z.device,
-            dtype=z.dtype,
+            num_players, batch_size, input_dim, input_dim,
+            device=z.device, dtype=z.dtype,
         )
 
         for i in range(num_players):
@@ -346,13 +355,13 @@ class ErgodicSearchEnv(gym.Env):
             sin_k2y = torch.sin(pi * k2.unsqueeze(0) * py.unsqueeze(1))
             cos_k2y = torch.cos(pi * k2.unsqueeze(0) * py.unsqueeze(1))
 
-            # SMC Fourier gradient
+            # SMC Fourier gradient (static — directional hint only)
             jac_x = grad_scale * torch.sum(wk * k1 * pi * sin_k1x * cos_k2y, dim=1)
             jac_y = grad_scale * torch.sum(wk * k2 * pi * cos_k1x * sin_k2y, dim=1)
 
-            # Boundary repulsion: quadratic wall potential
-            margin = 0.02  # minimum distance from boundary
-            w_wall = 0.5  # wall strength
+            # Boundary repulsion
+            margin = 0.02
+            w_wall = 0.5
             px_safe = torch.clamp(px, margin, 1.0 - margin)
             py_safe = torch.clamp(py, margin, 1.0 - margin)
             wall_jac_x = (
@@ -367,7 +376,7 @@ class ErgodicSearchEnv(gym.Env):
             jacobians[i, :, ix] = torch.clamp(jac_x + wall_jac_x, -10.0, 10.0)
             jacobians[i, :, iy] = torch.clamp(jac_y + wall_jac_y, -10.0, 10.0)
 
-            # Inter-agent repulsion (Jacobian only — safe since Hessian is fixed)
+            # Inter-agent repulsion
             for j in range(num_players):
                 if j != i:
                     dx = px - z[:, j * 4]
@@ -381,9 +390,9 @@ class ErgodicSearchEnv(gym.Env):
             jacobians[i, :, iax] = 2.0 * alpha * z[:, iax]
             jacobians[i, :, iay] = 2.0 * alpha * z[:, iay]
 
-            # Velocity damping: penalize zero velocity (agents should move)
-            jacobians[i, :, ivx] = 0.1 * z[:, ivx]
-            jacobians[i, :, ivy] = 0.1 * z[:, ivy]
+            # Velocity: penalize stillness (negative cost gradient for speed)
+            jacobians[i, :, ivx] = -0.2 * z[:, ivx]
+            jacobians[i, :, ivy] = -0.2 * z[:, ivy]
 
             # FIXED positive-definite diagonal Hessian
             hessians[i, :, ix, ix] = pos_hess
@@ -407,47 +416,31 @@ class ErgodicSearchEnv(gym.Env):
 
     @torch.jit.script
     def dynamics_jacobian(states, controls):
-        """
-        Corrected analytical Jacobian for double integrator with damping.
-
-        next_x  = x + dt * new_vx = x + dt*((1-d*dt)*vx + dt*ax)
-        next_vx = (1-d*dt)*vx + dt*ax
-
-        So: ∂next_x/∂x   = 1
-            ∂next_x/∂vx  = dt*(1-d*dt)     (NOT just dt)
-            ∂next_x/∂ax  = dt*dt = dt²      (was MISSING before)
-            ∂next_vx/∂vx = 1-d*dt
-            ∂next_vx/∂ax = dt
-        """
         batch_size = states.shape[0]
         n = states.shape[1]
         m = controls.shape[1]
         num_players = n // 4
         dt = 0.05
         damp = 0.5
-        dt_damped = dt * (1.0 - damp * dt)  # = 0.04875
-        dt_sq = dt * dt  # = 0.0025
+        dt_damped = dt * (1.0 - damp * dt)
+        dt_sq = dt * dt
 
         jacobian = torch.zeros(batch_size, n, n + m, device=states.device)
         for i in range(num_players):
             sx, sy, svx, svy = i * 4, i * 4 + 1, i * 4 + 2, i * 4 + 3
             cax, cay = n + i * 2, n + i * 2 + 1
 
-            # Position x
             jacobian[:, sx, sx] = 1.0
             jacobian[:, sx, svx] = dt_damped
             jacobian[:, sx, cax] = dt_sq
 
-            # Position y
             jacobian[:, sy, sy] = 1.0
             jacobian[:, sy, svy] = dt_damped
             jacobian[:, sy, cay] = dt_sq
 
-            # Velocity x
             jacobian[:, svx, svx] = 1.0 - damp * dt
             jacobian[:, svx, cax] = dt
 
-            # Velocity y
             jacobian[:, svy, svy] = 1.0 - damp * dt
             jacobian[:, svy, cay] = dt
 
@@ -455,7 +448,6 @@ class ErgodicSearchEnv(gym.Env):
 
     @torch.jit.script
     def dynamics(states, controls):
-        """Double integrator with damping."""
         batch_size = states.shape[0]
         n = states.shape[1]
         num_players = n // 4
