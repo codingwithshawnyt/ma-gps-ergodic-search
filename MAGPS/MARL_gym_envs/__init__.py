@@ -37,6 +37,6 @@ register(
 register(
     id="ergodic_search-v0",
     entry_point="MAGPS.MARL_gym_envs.ergodic_search:ErgodicSearchEnv",
-    max_episode_steps=200,
+    max_episode_steps=1000,
     reward_threshold=float("-inf"),
 )
