@@ -8,9 +8,9 @@ trains policies:
    cooperative objective.
 2. The training signal is based on ergodic metric improvement and control
    effort, not on static peak-seeking terms like -log(pdf).
-3. The observation exposes low-order coverage-error coefficients so the
-   policy can observe the hidden trajectory-history term that drives the
-   ergodic metric.
+3. The observation exposes the full set of coverage-error coefficients used
+   by the ergodic reward, so the policy can observe the same trajectory-
+   history signal that drives the objective.
 
 The MA-GPS local Riccati teacher is still only a static directional hint.
 For ergodic_search-v0, this env is intended to be validated first with the
@@ -77,7 +77,9 @@ class ErgodicSearchEnv(gym.Env):
         self.w_metric = reward_metric_weight
         self.w_ctrl = reward_control_weight
         self.obs_clip = 2.0
-        self.obs_k_per_dim = 4
+        # Expose the full Fourier coefficient set used by the reward so the
+        # policy is not judged on hidden coverage state.
+        self.obs_k_per_dim = self.num_k_per_dim
 
         self.nx = 4
         self.nu = 2
