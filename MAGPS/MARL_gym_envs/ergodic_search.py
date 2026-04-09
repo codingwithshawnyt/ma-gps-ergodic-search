@@ -1,21 +1,20 @@
 """
-Multi-Agent Ergodic Search Environment (v5 — delta-metric reward)
+Multi-Agent Ergodic Search Environment (v6 — coherent MAPPO baseline)
 
-Key insight from Mathew & Mezić (2011) and Miller & Murphey (2013):
-The ergodic metric is a TRAJECTORY-LEVEL functional. It cannot be
-decomposed into per-step costs for a Riccati solver. The MA-GPS LQ
-guidance can only provide a directional hint (toward high-PDF regions).
-The actual coverage behavior must come from the RL reward.
+This version makes the environment consistent with how the repo actually
+trains policies:
 
-Changes from v4:
-1. PRIMARY reward = negative change in ergodic metric (directly optimizes
-   what we care about: when agents move to reduce metric, reward > 0)
-2. SECONDARY reward = speed bonus (keeps agents moving, less noisy)
-3. REMOVED: PDF-at-position reward (caused parking at peaks)
-4. REMOVED: PDF-weighted cell bonus (caused parking at peaks)
-5. LQ guidance uses STATIC weights (dynamic S_k doesn't work in batch
-   setting — costs_jacobian_and_hessian is called on off-policy batches)
-6. Use with --behavior-loss-weight 0.1 (let RL reward dominate)
+1. The scalar env reward and info["individual_cost"] now encode the same
+   cooperative objective.
+2. The training signal is based on ergodic metric improvement and control
+   effort, not on static peak-seeking terms like -log(pdf).
+3. The observation exposes low-order coverage-error coefficients so the
+   policy can observe the hidden trajectory-history term that drives the
+   ergodic metric.
+
+The MA-GPS local Riccati teacher is still only a static directional hint.
+For ergodic_search-v0, this env is intended to be validated first with the
+guidance-free MAPPO baseline.
 """
 
 from typing import Optional
@@ -57,7 +56,6 @@ class ErgodicSearchEnv(gym.Env):
         velocity_limit: float = 0.5,
         damping: float = 0.5,
         reward_metric_weight: float = 500.0,
-        reward_speed_weight: float = 5.0,
         reward_control_weight: float = 0.05,
         init_pos_low: float = 0.2,
         init_pos_high: float = 0.8,
@@ -77,8 +75,9 @@ class ErgodicSearchEnv(gym.Env):
         self.init_pos_high = init_pos_high
         self.render_mode = render_mode
         self.w_metric = reward_metric_weight
-        self.w_speed = reward_speed_weight
         self.w_ctrl = reward_control_weight
+        self.obs_clip = 2.0
+        self.obs_k_per_dim = 4
 
         self.nx = 4
         self.nu = 2
@@ -91,11 +90,18 @@ class ErgodicSearchEnv(gym.Env):
 
         state_low = np.tile([0.0, 0.0, -velocity_limit, -velocity_limit], num_agents)
         state_high = np.tile([1.0, 1.0, velocity_limit, velocity_limit], num_agents)
+        obs_coeff_dim = self.obs_k_per_dim * self.obs_k_per_dim
+        obs_low = np.concatenate(
+            [state_low, -self.obs_clip * np.ones(obs_coeff_dim, dtype=np.float64)]
+        )
+        obs_high = np.concatenate(
+            [state_high, self.obs_clip * np.ones(obs_coeff_dim, dtype=np.float64)]
+        )
         action_low = -action_limit * np.ones(self.total_action_dim)
         action_high = action_limit * np.ones(self.total_action_dim)
 
         self.observation_space = spaces.Box(
-            low=state_low, high=state_high, dtype=np.float64
+            low=obs_low, high=obs_high, dtype=np.float64
         )
         self.action_space = spaces.Box(
             low=action_low, high=action_high, dtype=np.float64
@@ -105,6 +111,12 @@ class ErgodicSearchEnv(gym.Env):
 
         self._initialize_fourier_basis()
         self.phik_list = self._compute_target_coefficients()
+        obs_mask = (
+            (self.ks[:, 0] < self.obs_k_per_dim)
+            & (self.ks[:, 1] < self.obs_k_per_dim)
+        )
+        self.obs_coeff_indices = np.flatnonzero(obs_mask)
+        self.obs_coeff_dim = len(self.obs_coeff_indices)
 
         self.lq_k_max = 5
         self._precompute_lq_weights()
@@ -197,6 +209,17 @@ class ErgodicSearchEnv(gym.Env):
             ck = np.zeros_like(self.ck_list_update)
         return np.sum(self.lamk_list * np.square(ck - self.phik_list))
 
+    def _compute_coverage_error_obs(self):
+        if self.current_time > 0:
+            ck = self.ck_list_update / self.current_time
+        else:
+            ck = np.zeros_like(self.ck_list_update)
+        s_obs = ck[self.obs_coeff_indices] - self.phik_list[self.obs_coeff_indices]
+        return np.clip(s_obs, -self.obs_clip, self.obs_clip)
+
+    def _get_obs(self):
+        return np.concatenate([self.state, self._compute_coverage_error_obs()])
+
     def step(self, action):
         action = np.clip(action, -self.action_limit, self.action_limit)
         accel = action.reshape(self.num_agents, 2)
@@ -236,35 +259,18 @@ class ErgodicSearchEnv(gym.Env):
             gy = min(int(new_pos[i, 1] * self.grid_res), self.grid_res - 1)
             self.visit_grid[gx, gy] += 1
 
-        # ==================================================================
-        # REWARD: directly optimize the ergodic metric
-        # ==================================================================
-        reward = 0.0
-
-        # 1. PRIMARY: negative delta-metric (reward DECREASING metric)
-        #    When agents move to new areas: metric decreases → positive reward
-        #    When agents park: metric increases (time-avg concentrates) → negative
-        reward += self.w_metric * (-delta_metric)
-
-        # 2. SECONDARY: speed bonus (helps exploration, less noisy than metric)
-        for i in range(self.num_agents):
-            speed = np.linalg.norm(new_vel[i])
-            reward += self.w_speed * speed
-
-        # 3. Light control penalty
-        reward -= self.w_ctrl * np.sum(accel ** 2)
-
-        # ==================================================================
+        global_metric_term = self.w_metric * (-delta_metric)
 
         new_agents = np.column_stack([new_pos, new_vel])
         self.state = new_agents.ravel()
         self.step_count += 1
 
-        # Per-player costs for LQ game (used by MA-GPS Riccati solver)
         costs = np.zeros(self.num_players)
         for i in range(self.num_players):
-            pdf_val = max(self._target_pdf_single(new_pos[i]), 1e-10)
-            costs[i] = -np.log(pdf_val) + 0.1 * np.sum(accel[i] ** 2)
+            control_penalty = self.w_ctrl * np.sum(accel[i] ** 2)
+            costs[i] = global_metric_term / self.num_players - control_penalty
+
+        reward = float(np.sum(costs))
 
         terminated = False
         truncated = self.step_count >= self.max_episode_steps
@@ -275,16 +281,20 @@ class ErgodicSearchEnv(gym.Env):
             "coverage_fraction": float(
                 np.sum(self.visit_grid > 0) / (self.grid_res**2)
             ),
+            "mean_speed": float(np.mean(np.linalg.norm(new_vel, axis=1))),
             "time": float(self.current_time),
             "step": self.step_count,
             "individual_cost": costs,
         }
-        return self.state, reward, terminated, truncated, info
+        return self._get_obs(), reward, terminated, truncated, info
 
     def reset(self, seed: Optional[int] = None, options: Optional[dict] = None):
         super().reset(seed=seed)
         if options is not None and "initial_state" in options:
-            self.state = options["initial_state"]
+            initial_state = np.asarray(options["initial_state"], dtype=np.float64)
+            if initial_state.shape[0] == self.observation_space.shape[0]:
+                initial_state = initial_state[: self.total_state_dim]
+            self.state = initial_state
         else:
             agents = np.zeros((self.num_agents, 4))
             agents[:, :2] = self.np_random.uniform(
@@ -301,7 +311,7 @@ class ErgodicSearchEnv(gym.Env):
         self.current_time = 0.0
         self.step_count = 0
         self.visit_grid = np.zeros((self.grid_res, self.grid_res))
-        return self.state, {}
+        return self._get_obs(), {}
 
     def render(self):
         pass

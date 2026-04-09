@@ -65,6 +65,12 @@ def get_args() -> argparse.Namespace:
 
 args=get_args()
 env = gym.make(args.task)
+if args.task == "ergodic_search-v0":
+    raise SystemExit(
+        "ergodic_search-v0 is blocked in run_magps.py: "
+        "ergodic search baseline must be validated with MAPPO before "
+        "MA-GPS guidance is enabled."
+    )
 args.max_action = env.action_space.high[0]
 args.state_shape = env.observation_space.shape or env.observation_space.n
 args.action_shape = env.action_space.shape or env.action_space.n
@@ -231,5 +237,4 @@ for iter in range(args.total_episodes):
         
     epoch = epoch + args.epoch
     save_best_fn(policy, epoch=epoch)
-
 
